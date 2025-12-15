@@ -1,0 +1,73 @@
+name: 'Fetch Typesense Config'
+description: 'Fetches Typesense configuration from GCP Secret Manager and outputs connection parameters'
+author: 'destaquesgovbr'
+
+branding:
+  icon: 'database'
+  color: 'blue'
+
+inputs:
+  workload_identity_provider:
+    description: 'GCP Workload Identity Provider'
+    required: true
+  service_account:
+    description: 'GCP Service Account email'
+    required: true
+  project_id:
+    description: 'GCP Project ID'
+    required: false
+    default: 'inspire-7-finep'
+  secret_name:
+    description: 'Secret name in Secret Manager'
+    required: false
+    default: 'typesense-config'
+
+outputs:
+  host:
+    description: 'Typesense host'
+    value: ${{ steps.parse.outputs.host }}
+  port:
+    description: 'Typesense port'
+    value: ${{ steps.parse.outputs.port }}
+  protocol:
+    description: 'Typesense protocol (http or https)'
+    value: ${{ steps.parse.outputs.protocol }}
+  api_key:
+    description: 'Typesense search-only API key (masked in logs)'
+    value: ${{ steps.parse.outputs.api_key }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Authenticate to Google Cloud
+      uses: google-github-actions/auth@v2
+      with:
+        workload_identity_provider: ${{ inputs.workload_identity_provider }}
+        service_account: ${{ inputs.service_account }}
+
+    - name: Set up Cloud SDK
+      uses: google-github-actions/setup-gcloud@v2
+
+    - name: Fetch and parse Typesense config
+      id: parse
+      shell: bash
+      run: |
+        CONFIG=$(gcloud secrets versions access latest \
+          --secret="${{ inputs.secret_name }}" \
+          --project="${{ inputs.project_id }}")
+
+        HOST=$(echo "$CONFIG" | jq -r '.host')
+        PORT=$(echo "$CONFIG" | jq -r '.port')
+        PROTOCOL=$(echo "$CONFIG" | jq -r '.protocol')
+        API_KEY=$(echo "$CONFIG" | jq -r '.searchOnlyApiKey')
+
+        # Mask the API key in logs
+        echo "::add-mask::$API_KEY"
+
+        # Set outputs
+        echo "host=$HOST" >> $GITHUB_OUTPUT
+        echo "port=$PORT" >> $GITHUB_OUTPUT
+        echo "protocol=$PROTOCOL" >> $GITHUB_OUTPUT
+        echo "api_key=$API_KEY" >> $GITHUB_OUTPUT
+
+        echo "Successfully fetched Typesense config from Secret Manager"
