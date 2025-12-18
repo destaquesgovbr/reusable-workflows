@@ -18,9 +18,9 @@ inputs:
     required: false
     default: 'inspire-7-finep'
   secret_name:
-    description: 'Secret name in Secret Manager'
+    description: 'Secret name in Secret Manager. Use typesense-read-conn for read-only access (portal) or typesense-write-conn for write access (data loaders)'
     required: false
-    default: 'typesense-config'
+    default: 'typesense-read-conn'
 
 outputs:
   host:
@@ -33,7 +33,7 @@ outputs:
     description: 'Typesense protocol (http or https)'
     value: ${{ steps.parse.outputs.protocol }}
   api_key:
-    description: 'Typesense search-only API key (masked in logs)'
+    description: 'Typesense API key (masked in logs)'
     value: ${{ steps.parse.outputs.api_key }}
 
 runs:
@@ -59,7 +59,9 @@ runs:
         HOST=$(echo "$CONFIG" | jq -r '.host')
         PORT=$(echo "$CONFIG" | jq -r '.port')
         PROTOCOL=$(echo "$CONFIG" | jq -r '.protocol')
-        API_KEY=$(echo "$CONFIG" | jq -r '.searchOnlyApiKey')
+
+        # Support both new format (apiKey) and old format (searchOnlyApiKey) for backwards compatibility
+        API_KEY=$(echo "$CONFIG" | jq -r '.apiKey // .searchOnlyApiKey')
 
         # Mask the API key in logs
         echo "::add-mask::$API_KEY"
@@ -70,4 +72,4 @@ runs:
         echo "protocol=$PROTOCOL" >> $GITHUB_OUTPUT
         echo "api_key=$API_KEY" >> $GITHUB_OUTPUT
 
-        echo "Successfully fetched Typesense config from Secret Manager"
+        echo "Successfully fetched Typesense config from Secret Manager (secret: ${{ inputs.secret_name }})"
