@@ -48,11 +48,6 @@ on:
         type: boolean
         default: false
 
-env:
-  PROJECT_ID: inspire-7-finep
-  COMPOSER_ENVIRONMENT: destaquesgovbr-composer
-  COMPOSER_REGION: us-central1
-
 jobs:
   validate-dags:
     name: Validate DAGs
@@ -113,6 +108,10 @@ jobs:
     permissions:
       contents: read
       id-token: write
+    env:
+      PROJECT_ID: inspire-7-finep
+      COMPOSER_ENVIRONMENT: destaquesgovbr-composer
+      COMPOSER_REGION: us-central1
 
     steps:
       - name: Checkout code
