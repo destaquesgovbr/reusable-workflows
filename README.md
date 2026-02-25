@@ -15,6 +15,38 @@ Fetches Typesense configuration from GCP Secret Manager. Handles authentication 
     service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
 ```
 
+## Available Workflows
+
+### [composer-deploy-dags](./.github/workflows/composer-deploy-dags.yml)
+
+Reusable workflow that validates and deploys Airflow DAGs to Cloud Composer. Handles GCP authentication (Workload Identity), bucket discovery, `gsutil rsync`, and post-deploy verification.
+
+```yaml
+jobs:
+  deploy:
+    uses: destaquesgovbr/reusable-workflows/.github/workflows/composer-deploy-dags.yml@v1
+    with:
+      dags_local_path: dags
+      dags_bucket_subdir: scraper
+```
+
+#### Inputs
+
+| Input | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `dags_local_path` | yes | — | Local path to DAGs directory |
+| `dags_bucket_subdir` | yes | — | Subdirectory in Composer bucket |
+| `python_version` | no | `3.11` | Python version for validation |
+| `airflow_version` | no | `3.0.1` | Airflow version for validation |
+| `airflow_extra_packages` | no | `apache-airflow-providers-postgres` | Extra pip packages |
+| `rsync_exclude` | no | `""` | Regex exclusion pattern for gsutil rsync |
+| `check_imports` | no | `false` | Test Python imports beyond syntax |
+
+#### Jobs
+
+1. **validate-dags** — Installs Airflow, runs `py_compile` on all DAG files, optionally checks imports
+2. **deploy-dags** — Authenticates to GCP, discovers Composer bucket, syncs DAGs via `gsutil rsync -r -d`, verifies deployment, waits for Airflow to parse
+
 ## Versioning
 
 This repository uses semantic versioning:
