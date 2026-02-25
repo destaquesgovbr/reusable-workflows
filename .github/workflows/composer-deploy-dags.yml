@@ -47,6 +47,11 @@ on:
         required: false
         type: boolean
         default: false
+      plugins_local_path:
+        description: 'Local path to plugins directory (e.g., src/data_publishing). If empty, skips plugin deployment.'
+        required: false
+        type: string
+        default: ''
 
 jobs:
   validate-dags:
@@ -157,6 +162,22 @@ jobs:
         run: |
           echo "Verifying DAGs in bucket..."
           gsutil ls -l ${{ steps.composer.outputs.dags_bucket }}/${{ inputs.dags_bucket_subdir }}/
+
+      - name: Deploy plugins to GCS
+        if: inputs.plugins_local_path != ''
+        run: |
+          PLUGINS_BUCKET=$(echo "${{ steps.composer.outputs.dags_bucket }}" | sed 's|/dags$|/plugins|')
+          echo "Syncing plugins to $PLUGINS_BUCKET/${{ inputs.dags_bucket_subdir }}/..."
+          gsutil -m rsync -r -d \
+            ${{ inputs.plugins_local_path }}/ $PLUGINS_BUCKET/${{ inputs.dags_bucket_subdir }}/
+          echo "Plugins deployed successfully!"
+
+      - name: Verify plugins deployment
+        if: inputs.plugins_local_path != ''
+        run: |
+          PLUGINS_BUCKET=$(echo "${{ steps.composer.outputs.dags_bucket }}" | sed 's|/dags$|/plugins|')
+          echo "Verifying plugins in bucket..."
+          gsutil ls -r $PLUGINS_BUCKET/${{ inputs.dags_bucket_subdir }}/
 
       - name: Wait for Airflow to parse DAGs
         run: |
