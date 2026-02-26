@@ -167,17 +167,19 @@ jobs:
         if: inputs.plugins_local_path != ''
         run: |
           PLUGINS_BUCKET=$(echo "${{ steps.composer.outputs.dags_bucket }}" | sed 's|/dags$|/plugins|')
-          echo "Syncing plugins to $PLUGINS_BUCKET/${{ inputs.dags_bucket_subdir }}/..."
+          PLUGINS_SUBDIR=$(basename "${{ inputs.plugins_local_path }}")
+          echo "Syncing plugins to $PLUGINS_BUCKET/$PLUGINS_SUBDIR/..."
           gsutil -m rsync -r -d \
-            ${{ inputs.plugins_local_path }}/ $PLUGINS_BUCKET/${{ inputs.dags_bucket_subdir }}/
+            ${{ inputs.plugins_local_path }}/ $PLUGINS_BUCKET/$PLUGINS_SUBDIR/
           echo "Plugins deployed successfully!"
 
       - name: Verify plugins deployment
         if: inputs.plugins_local_path != ''
         run: |
           PLUGINS_BUCKET=$(echo "${{ steps.composer.outputs.dags_bucket }}" | sed 's|/dags$|/plugins|')
+          PLUGINS_SUBDIR=$(basename "${{ inputs.plugins_local_path }}")
           echo "Verifying plugins in bucket..."
-          gsutil ls -r $PLUGINS_BUCKET/${{ inputs.dags_bucket_subdir }}/
+          gsutil ls -r $PLUGINS_BUCKET/$PLUGINS_SUBDIR/
 
       - name: Wait for Airflow to parse DAGs
         run: |
