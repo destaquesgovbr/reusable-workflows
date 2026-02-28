@@ -1,0 +1,94 @@
+# Reusable workflow: Build Docker image, push to Artifact Registry, deploy to Cloud Run
+name: Cloud Run Deploy
+
+on:
+  workflow_call:
+    inputs:
+      dockerfile:
+        description: "Path to Dockerfile relative to repo root"
+        required: true
+        type: string
+      ar_repository:
+        description: "Artifact Registry repository name (e.g., destaquesgovbr-scraper-api)"
+        required: true
+        type: string
+      image_name:
+        description: "Docker image name within the AR repository"
+        required: true
+        type: string
+      cloud_run_service:
+        description: "Cloud Run service name to update"
+        required: true
+        type: string
+      cloud_run_region:
+        description: "Cloud Run region"
+        required: false
+        type: string
+        default: "southamerica-east1"
+      free_disk_space:
+        description: "Free disk space before build (for large images like ML models)"
+        required: false
+        type: boolean
+        default: false
+
+env:
+  AR_REGISTRY: southamerica-east1-docker.pkg.dev
+  PROJECT_ID: inspire-7-finep
+
+jobs:
+  build-push-deploy:
+    name: Build, Push and Deploy
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Free disk space
+        if: ${{ inputs.free_disk_space }}
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          docker system prune -af
+          df -h
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: projects/990583792367/locations/global/workloadIdentityPools/github-pool/providers/github-provider
+          service_account: github-actions@inspire-7-finep.iam.gserviceaccount.com
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker ${{ env.AR_REGISTRY }} --quiet
+
+      - name: Build and push image
+        run: |
+          IMAGE="${{ env.AR_REGISTRY }}/${{ env.PROJECT_ID }}/${{ inputs.ar_repository }}/${{ inputs.image_name }}"
+          docker build -f ${{ inputs.dockerfile }} \
+            -t ${IMAGE}:latest \
+            -t ${IMAGE}:${{ github.sha }} .
+          docker push ${IMAGE}:latest
+          docker push ${IMAGE}:${{ github.sha }}
+
+      - name: Deploy to Cloud Run
+        run: |
+          IMAGE="${{ env.AR_REGISTRY }}/${{ env.PROJECT_ID }}/${{ inputs.ar_repository }}/${{ inputs.image_name }}"
+          gcloud run services update ${{ inputs.cloud_run_service }} \
+            --image ${IMAGE}:${{ github.sha }} \
+            --region ${{ inputs.cloud_run_region }}
+
+      - name: Show service URL
+        run: |
+          URL=$(gcloud run services describe ${{ inputs.cloud_run_service }} \
+            --region ${{ inputs.cloud_run_region }} \
+            --format="value(status.url)")
+          echo "${{ inputs.cloud_run_service }} deployed at: $URL"
+          echo "## ${{ inputs.cloud_run_service }} Deployed" >> $GITHUB_STEP_SUMMARY
+          echo "URL: $URL" >> $GITHUB_STEP_SUMMARY
