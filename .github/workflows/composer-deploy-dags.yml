@@ -116,7 +116,7 @@ jobs:
     env:
       PROJECT_ID: inspire-7-finep
       COMPOSER_ENVIRONMENT: destaquesgovbr-composer
-      COMPOSER_REGION: us-central1
+      COMPOSER_REGION: southamerica-east1
 
     steps:
       - name: Checkout code
