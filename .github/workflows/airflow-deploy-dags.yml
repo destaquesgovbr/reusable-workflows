@@ -1,0 +1,410 @@
+# Reusable Workflow: deploy de DAGs (e plugins) do Airflow em um ou mais buckets GCS
+#
+# Sucessor do composer-deploy-dags.yml (v1), que continua igual para quem ainda o usa.
+# Diferenças:
+#   - não descobre o bucket com `gcloud composer environments describe`: recebe a lista
+#     em `buckets` (sem gs://) e publica em cada um, no layout do Composer:
+#       DAGs    -> gs://<bucket>/dags/<dags_bucket_subdir>/
+#       plugins -> gs://<bucket>/plugins/<basename(plugins_local_path)>/
+#   - valida com o Airflow 3.1.8 (o da imagem do Airflow próprio) instalado com o
+#     arquivo de constraints oficial, e o py_compile é recursivo (DAGs e plugins);
+#   - usa `gcloud storage rsync` no lugar do `gsutil rsync`.
+#
+# Uso:
+#   jobs:
+#     deploy:
+#       uses: destaquesgovbr/reusable-workflows/.github/workflows/airflow-deploy-dags.yml@v3
+#       with:
+#         dags_local_path: dags
+#         dags_bucket_subdir: scraper
+#
+# Migração do Composer para o Airflow próprio (infra/_plan/migrar-composer-para-airflow-proprio.md):
+# na Fase 3 o default de `buckets` publica no bucket do Composer e no do Airflow próprio.
+
+name: Deploy DAGs to Airflow
+
+on:
+  workflow_call:
+    inputs:
+      dags_local_path:
+        description: 'Caminho local do diretório de DAGs (ex.: dags, src/data_platform/dags)'
+        required: true
+        type: string
+      dags_bucket_subdir:
+        description: >-
+          Subpasta em gs://<bucket>/dags/ (ex.: scraper, data-platform). Um único nome, sem '/';
+          'platform' é reservado à DAG de heartbeat do repo infra.
+        required: true
+        type: string
+      buckets:
+        description: >-
+          Buckets de destino, só o nome (sem gs://), separados por espaço ou quebra de linha.
+          O deploy é feito em cada um, na ordem.
+        required: false
+        type: string
+        # Fase 3 da migração: bucket do Cloud Composer + bucket do Airflow próprio.
+        # Fase 7 (desligar o Composer): tirar daqui southamerica-east1-destaque-227e22da-bucket
+        # e mover a tag v3; os callers não mudam.
+        default: 'southamerica-east1-destaque-227e22da-bucket destaquesgovbr-airflow'
+      python_version:
+        description: 'Versão do Python da validação (a da imagem do Airflow)'
+        required: false
+        type: string
+        default: '3.11'
+      airflow_version:
+        description: 'Versão do Airflow da validação (a da imagem, infra/airflow/Dockerfile)'
+        required: false
+        type: string
+        default: '3.1.8'
+      airflow_extra_packages:
+        description: 'Pacotes pip extras da validação, separados por espaço (instalados com as constraints do Airflow)'
+        required: false
+        type: string
+        default: 'apache-airflow-providers-postgres apache-airflow-providers-google apache-airflow-providers-standard'
+      rsync_exclude:
+        description: >-
+          Regex Python de arquivos de DAG a não publicar (ex.: requirements\.txt$). Testada com
+          re.match no caminho relativo a dags_local_path, como o -x do gsutil rsync.
+        required: false
+        type: string
+        default: ''
+      check_imports:
+        description: 'Executa cada DAG para achar erros de import (só avisa, não bloqueia o deploy)'
+        required: false
+        type: boolean
+        default: false
+      plugins_local_path:
+        description: 'Caminho local do pacote de plugins (ex.: src/data_publishing). Vazio = sem plugins.'
+        required: false
+        type: string
+        default: ''
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  check-inputs:
+    name: Conferir inputs
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    outputs:
+      buckets: ${{ steps.check.outputs.buckets }}
+      plugins_subdir: ${{ steps.check.outputs.plugins_subdir }}
+    steps:
+      - name: Conferir inputs
+        id: check
+        env:
+          BUCKETS: ${{ inputs.buckets }}
+          DAGS_LOCAL_PATH: ${{ inputs.dags_local_path }}
+          DAGS_SUBDIR: ${{ inputs.dags_bucket_subdir }}
+          PLUGINS_LOCAL_PATH: ${{ inputs.plugins_local_path }}
+          RSYNC_EXCLUDE: ${{ inputs.rsync_exclude }}
+        run: |
+          falhou=0
+          erro() { echo "::error::$*"; falhou=1; }
+          nome_ok='^[A-Za-z0-9][A-Za-z0-9._-]*$'
+
+          if [ -z "$DAGS_LOCAL_PATH" ]; then
+            erro "dags_local_path é obrigatório."
+          fi
+
+          # O rsync apaga no destino o que não existe na origem: a subpasta precisa ser um
+          # nome só, nunca a raiz de dags/ nem a pasta de outro repo.
+          if [ -z "$DAGS_SUBDIR" ]; then
+            erro "dags_bucket_subdir é obrigatório: o deploy nunca escreve na raiz de dags/."
+          elif [[ "$DAGS_SUBDIR" == */* ]]; then
+            erro "dags_bucket_subdir ('$DAGS_SUBDIR') não pode conter '/': use um único nome de pasta."
+          elif [ "$DAGS_SUBDIR" = platform ]; then
+            erro "dags_bucket_subdir 'platform' é reservado à DAG de heartbeat do repo infra (dags/platform/)."
+          elif ! [[ "$DAGS_SUBDIR" =~ $nome_ok ]]; then
+            erro "dags_bucket_subdir ('$DAGS_SUBDIR') aceita só letras, números, '.', '_' e '-', começando por letra ou número."
+          fi
+
+          plugins_subdir=""
+          if [ -n "$PLUGINS_LOCAL_PATH" ]; then
+            plugins_subdir=$(basename -- "$PLUGINS_LOCAL_PATH")
+            if ! [[ "$plugins_subdir" =~ $nome_ok ]]; then
+              erro "plugins_local_path ('$PLUGINS_LOCAL_PATH') precisa terminar no nome do pacote (ex.: src/data_publishing)."
+            fi
+          fi
+
+          # Só o nome do bucket; repetidos entram uma vez.
+          read -r -d '' -a lista <<< "$BUCKETS" || true
+          buckets=()
+          declare -A vistos=()
+          for b in "${lista[@]}"; do
+            if [[ "$b" == gs://* ]]; then
+              erro "bucket '$b': informe só o nome, sem gs://."
+            elif ! [[ "$b" =~ ^[a-z0-9][a-z0-9._-]{1,220}[a-z0-9]$ ]]; then
+              erro "nome de bucket inválido: '$b'."
+            elif [ -z "${vistos[$b]:-}" ]; then
+              vistos[$b]=1
+              buckets+=("$b")
+            fi
+          done
+          if [ "${#buckets[@]}" -eq 0 ] && [ "$falhou" -eq 0 ]; then
+            erro "buckets está vazio."
+          fi
+
+          # O ';;' é o separador da lista do --exclude no job de deploy. O gcloud também
+          # descarta um ';' final (o valor termina em ';;;' e o último item vazio some),
+          # e a regex encurtada excluiria mais arquivos que no v1.
+          if [ -n "$RSYNC_EXCLUDE" ]; then
+            if [[ "$RSYNC_EXCLUDE" == *";;"* ]]; then
+              erro "rsync_exclude não pode conter ';;'."
+            elif [[ "$RSYNC_EXCLUDE" == *";" ]]; then
+              erro "rsync_exclude não pode terminar em ';' (o gcloud corta o ';' final da regex)."
+            elif ! python3 -c 'import os, re; re.compile(os.environ["RSYNC_EXCLUDE"])'; then
+              erro "rsync_exclude não é uma regex Python válida: '$RSYNC_EXCLUDE'."
+            fi
+          fi
+
+          if [ "$falhou" -ne 0 ]; then
+            exit 1
+          fi
+
+          echo "buckets=${buckets[*]}" >> "$GITHUB_OUTPUT"
+          echo "plugins_subdir=$plugins_subdir" >> "$GITHUB_OUTPUT"
+          echo "Destinos:"
+          for b in "${buckets[@]}"; do
+            if [ -n "$plugins_subdir" ]; then
+              echo "  ${PLUGINS_LOCAL_PATH%/}/ -> gs://$b/plugins/$plugins_subdir/"
+            fi
+            echo "  ${DAGS_LOCAL_PATH%/}/ -> gs://$b/dags/$DAGS_SUBDIR/"
+          done
+
+  validate-dags:
+    name: Validar DAGs
+    needs: check-inputs
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      DAGS_LOCAL_PATH: ${{ inputs.dags_local_path }}
+      PLUGINS_LOCAL_PATH: ${{ inputs.plugins_local_path }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python_version }}
+
+      - name: Instalar Airflow com as constraints oficiais
+        env:
+          AIRFLOW_VERSION: ${{ inputs.airflow_version }}
+          EXTRA_PACKAGES: ${{ inputs.airflow_extra_packages }}
+        run: |
+          # As constraints são por major.minor do Python (constraints-3.11.txt).
+          py=$(python -c 'import sys; print("%d.%d" % sys.version_info[:2])')
+          constraints="https://raw.githubusercontent.com/apache/airflow/constraints-${AIRFLOW_VERSION}/constraints-${py}.txt"
+          read -r -d '' -a extras <<< "$EXTRA_PACKAGES" || true
+          echo "Constraints: $constraints"
+          python -m pip install --upgrade pip
+          python -m pip install "apache-airflow==${AIRFLOW_VERSION}" "${extras[@]}" --constraint "$constraints"
+
+      - name: Validar sintaxe (py_compile)
+        env:
+          # Os .pyc vão para fora do checkout.
+          PYTHONPYCACHEPREFIX: ${{ runner.temp }}/pycache
+        run: |
+          if [ ! -d "$DAGS_LOCAL_PATH" ]; then
+            echo "::error::dags_local_path '$DAGS_LOCAL_PATH' não é um diretório."
+            exit 1
+          fi
+          dirs=("$DAGS_LOCAL_PATH")
+          if [ -n "$PLUGINS_LOCAL_PATH" ]; then
+            if [ ! -d "$PLUGINS_LOCAL_PATH" ]; then
+              echo "::error::plugins_local_path '$PLUGINS_LOCAL_PATH' não é um diretório."
+              exit 1
+            fi
+            dirs+=("$PLUGINS_LOCAL_PATH")
+          fi
+          # Sem nenhum .py, o rsync com delete apagaria as DAGs da subpasta no bucket.
+          if [ -z "$(find "$DAGS_LOCAL_PATH" -type f -name '*.py' -not -path '*/__pycache__/*' -print -quit)" ]; then
+            echo "::error::Nenhum .py em '$DAGS_LOCAL_PATH'."
+            exit 1
+          fi
+
+          total=0
+          falhas=0
+          while IFS= read -r -d '' f; do
+            total=$((total + 1))
+            if saida=$(python -m py_compile "$f" 2>&1); then
+              echo "OK    $f"
+            else
+              falhas=$((falhas + 1))
+              echo "ERRO  $f"
+              echo "::error file=$f::Erro de sintaxe em $f"
+              printf '%s\n' "$saida" | sed 's/^/      /'
+            fi
+          done < <(find "${dirs[@]}" -type f -name '*.py' -not -path '*/__pycache__/*' -print0 | sort -z)
+
+          echo "$total arquivo(s) verificado(s), $falhas com erro."
+          if [ "$falhas" -ne 0 ]; then
+            exit 1
+          fi
+
+      - name: Checar imports (não bloqueia)
+        if: inputs.check_imports
+        run: |
+          # Mesma semântica do v1: erro de import só gera aviso. DAGs que leem Variables ou
+          # env vars no parse falham aqui sem credenciais do GCP, e isso não é erro de deploy.
+          export AIRFLOW_HOME="$RUNNER_TEMP/airflow-home"
+          mkdir -p "$AIRFLOW_HOME"
+          airflow db migrate > /dev/null 2>&1 || true
+
+          # No Airflow os plugins ficam no sys.path (plugins/<pacote>/ -> import <pacote>).
+          extra_path="$PWD"
+          if [ -n "$PLUGINS_LOCAL_PATH" ]; then
+            extra_path="$(cd "$(dirname -- "${PLUGINS_LOCAL_PATH%/}")" && pwd):$extra_path"
+          fi
+          export PYTHONPATH="${extra_path}${PYTHONPATH:+:$PYTHONPATH}"
+
+          avisos=0
+          while IFS= read -r -d '' f; do
+            # Como o DAG_DISCOVERY_SAFE_MODE do Airflow: só arquivos que citam "airflow" e "dag".
+            if ! grep -qi airflow "$f" || ! grep -qi dag "$f"; then
+              continue
+            fi
+            echo "Testando imports: $f"
+            # run_name diferente de __main__: não executa blocos `if __name__ == "__main__"`.
+            if saida=$(timeout 120 python -c 'import runpy, sys; runpy.run_path(sys.argv[1], run_name="dag_import_check")' "$f" 2>&1); then
+              echo "  Imports OK"
+            else
+              avisos=$((avisos + 1))
+              ultima=$(printf '%s\n' "$saida" | tail -n 1 | tr -d '\r')
+              ultima=${ultima//'%'/'%25'}
+              echo "::warning file=$f::Import falhou (não bloqueia o deploy): ${ultima:-timeout ou erro sem mensagem}"
+              printf '%s\n' "$saida" | tail -n 20 | sed 's/^/    /'
+            fi
+          done < <(find "$DAGS_LOCAL_PATH" -type f -name '*.py' -not -path '*/__pycache__/*' -print0 | sort -z)
+
+          echo "$avisos arquivo(s) com aviso de import."
+
+  deploy-dags:
+    name: Deploy nos buckets
+    needs: [check-inputs, validate-dags]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+    # Dois deploys do mesmo repo/subpasta ao mesmo tempo disputariam o rsync com delete.
+    concurrency:
+      group: airflow-deploy-dags-${{ github.repository }}-${{ inputs.dags_bucket_subdir }}
+      cancel-in-progress: false
+    env:
+      PROJECT_ID: inspire-7-finep
+      BUCKETS: ${{ needs.check-inputs.outputs.buckets }}
+      DAGS_LOCAL_PATH: ${{ inputs.dags_local_path }}
+      DAGS_SUBDIR: ${{ inputs.dags_bucket_subdir }}
+      PLUGINS_LOCAL_PATH: ${{ inputs.plugins_local_path }}
+      PLUGINS_SUBDIR: ${{ needs.check-inputs.outputs.plugins_subdir }}
+      RSYNC_EXCLUDE: ${{ inputs.rsync_exclude }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: projects/990583792367/locations/global/workloadIdentityPools/github-pool/providers/github-provider
+          service_account: github-actions@inspire-7-finep.iam.gserviceaccount.com
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+
+      - name: Listar arquivos a publicar
+        run: |
+          echo "DAGs ($DAGS_LOCAL_PATH):"
+          find "$DAGS_LOCAL_PATH" -type f -not -path '*/__pycache__/*' | sort
+          if [ -n "$PLUGINS_LOCAL_PATH" ]; then
+            echo "Plugins ($PLUGINS_LOCAL_PATH):"
+            find "$PLUGINS_LOCAL_PATH" -type f -not -path '*/__pycache__/*' | sort
+          fi
+
+      - name: Sincronizar plugins e DAGs
+        run: |
+          # O --exclude do gcloud storage rsync é uma lista separada por vírgula; o prefixo
+          # ^;;^ troca o separador por ';;', para a regex do caller poder ter vírgula ou
+          # começar com '^'. Cada regex é testada com re.match no caminho relativo à pasta,
+          # na origem e no destino, como o -x do gsutil rsync do v1: o que casa não é
+          # copiado nem apagado. O rsync_exclude vale só para as DAGs, como no v1.
+          pycache='(.*/)?__pycache__/'
+          plugins_exclude="--exclude=^;;^${pycache}"
+          dags_exclude="--exclude=^;;^${pycache}${RSYNC_EXCLUDE:+;;$RSYNC_EXCLUDE}"
+
+          read -r -a buckets <<< "$BUCKETS"
+          falhas=()
+          for b in "${buckets[@]}"; do
+            echo "::group::gs://$b"
+            ok=true
+            # Plugins antes das DAGs: no primeiro deploy num bucket, a DAG não chega antes
+            # do código que ela importa.
+            if [ -n "$PLUGINS_LOCAL_PATH" ]; then
+              destino="gs://$b/plugins/$PLUGINS_SUBDIR/"
+              echo "Plugins: ${PLUGINS_LOCAL_PATH%/}/ -> $destino"
+              gcloud storage rsync --recursive --delete-unmatched-destination-objects \
+                "$plugins_exclude" "${PLUGINS_LOCAL_PATH%/}/" "$destino" || ok=false
+            fi
+            if [ "$ok" = true ]; then
+              destino="gs://$b/dags/$DAGS_SUBDIR/"
+              echo "DAGs: ${DAGS_LOCAL_PATH%/}/ -> $destino"
+              gcloud storage rsync --recursive --delete-unmatched-destination-objects \
+                "$dags_exclude" "${DAGS_LOCAL_PATH%/}/" "$destino" || ok=false
+            else
+              echo "::error::Plugins falharam em gs://$b; as DAGs não foram sincronizadas nesse bucket."
+            fi
+            echo "::endgroup::"
+            if [ "$ok" = true ]; then
+              echo "gs://$b: OK"
+            else
+              falhas+=("$b")
+            fi
+          done
+
+          # Um bucket com erro não impede o deploy nos outros, mas o job falha.
+          if [ "${#falhas[@]}" -ne 0 ]; then
+            echo "::error::Deploy falhou em: ${falhas[*]}"
+            exit 1
+          fi
+          echo "Deploy concluído em: ${buckets[*]}"
+
+      - name: Verificar deploy
+        run: |
+          read -r -a buckets <<< "$BUCKETS"
+          {
+            echo "### Deploy de \`$DAGS_LOCAL_PATH\` em \`dags/$DAGS_SUBDIR/\`"
+            echo ""
+            echo "| Bucket | DAGs | Plugins |"
+            echo "|---|---|---|"
+          } >> "$GITHUB_STEP_SUMMARY"
+          for b in "${buckets[@]}"; do
+            echo "::group::gs://$b"
+            echo "DAGs em gs://$b/dags/$DAGS_SUBDIR/:"
+            dags=$(gcloud storage ls --long "gs://$b/dags/$DAGS_SUBDIR/**")
+            printf '%s\n' "$dags"
+            n_dags=$(printf '%s\n' "$dags" | grep -c ' gs://' || true)
+            n_plugins="-"
+            if [ -n "$PLUGINS_LOCAL_PATH" ]; then
+              echo "Plugins em gs://$b/plugins/$PLUGINS_SUBDIR/:"
+              plugins=$(gcloud storage ls --long "gs://$b/plugins/$PLUGINS_SUBDIR/**")
+              printf '%s\n' "$plugins"
+              n_plugins=$(printf '%s\n' "$plugins" | grep -c ' gs://' || true)
+            fi
+            echo "::endgroup::"
+            echo "| \`$b\` | $n_dags arquivo(s) | $n_plugins |" >> "$GITHUB_STEP_SUMMARY"
+          done
+
+      - name: Aguardar o parse das DAGs
+        run: |
+          echo "Aguardando 60 segundos para o Airflow processar as DAGs..."
+          sleep 60
