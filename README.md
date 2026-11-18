@@ -57,7 +57,7 @@ O default de `buckets` publica no bucket do Composer e no do Airflow próprio en
 
 #### Jobs
 
-1. **check-inputs**: recusa `dags_bucket_subdir` vazio, com `/` ou igual a `platform`, nome de bucket inválido (ou com `gs://`) e `rsync_exclude` que não seja regex válida.
+1. **check-inputs**: recusa `dags_bucket_subdir` vazio, com `/` ou igual a `platform`, nome de bucket inválido (ou com `gs://`) e `rsync_exclude` que não seja regex válida, contenha `;;` ou termine em `;`.
 2. **validate-dags**: instala `apache-airflow==<airflow_version>` e os extras com o arquivo de constraints oficial (`constraints-<versão>/constraints-<python>.txt`); roda `py_compile` em todos os `.py` das DAGs e dos plugins, recursivamente (bloqueia o deploy). Com `check_imports`, executa cada arquivo de DAG (os que citam `airflow` e `dag`, como o safe mode do Airflow) com os plugins no `sys.path`; erro de import só gera aviso, como no v1, porque DAGs que leem Variables ou env vars no parse falham sem credenciais do GCP.
 3. **deploy-dags**: autentica via Workload Identity e, para cada bucket, roda `gcloud storage rsync --recursive --delete-unmatched-destination-objects` dos plugins e depois das DAGs. Um bucket com erro não impede os outros, mas o job falha. Lista o resultado (e um resumo no job summary) e espera 60 s pelo parse.
 
@@ -65,7 +65,7 @@ O default de `buckets` publica no bucket do Composer e no do Airflow próprio en
 
 - `__pycache__/` nunca é publicado.
 - `rsync_exclude` vale só para as DAGs e tem a semântica do `-x` do `gsutil rsync` do v1: a regex é testada com `re.match` (ancorada no início) no caminho relativo a `dags_local_path`, na origem e no destino. O que casa não é copiado nem apagado. Para excluir um arquivo em qualquer subpasta, use `(.*/)?nome$`.
-- `rsync_exclude` não pode conter `;;`, o separador usado no `--exclude` do `gcloud storage rsync`.
+- `rsync_exclude` não pode conter `;;`, o separador usado no `--exclude` do `gcloud storage rsync`, nem terminar em `;` (o gcloud corta o `;` final e a regex passaria a excluir mais arquivos).
 
 #### Migrando do `composer-deploy-dags@v1`
 

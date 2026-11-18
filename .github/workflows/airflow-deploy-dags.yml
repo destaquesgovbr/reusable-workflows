@@ -148,10 +148,14 @@ jobs:
             erro "buckets está vazio."
           fi
 
-          # O ';;' é o separador da lista do --exclude no job de deploy.
+          # O ';;' é o separador da lista do --exclude no job de deploy. O gcloud também
+          # descarta um ';' final (o valor termina em ';;;' e o último item vazio some),
+          # e a regex encurtada excluiria mais arquivos que no v1.
           if [ -n "$RSYNC_EXCLUDE" ]; then
             if [[ "$RSYNC_EXCLUDE" == *";;"* ]]; then
               erro "rsync_exclude não pode conter ';;'."
+            elif [[ "$RSYNC_EXCLUDE" == *";" ]]; then
+              erro "rsync_exclude não pode terminar em ';' (o gcloud corta o ';' final da regex)."
             elif ! python3 -c 'import os, re; re.compile(os.environ["RSYNC_EXCLUDE"])'; then
               erro "rsync_exclude não é uma regex Python válida: '$RSYNC_EXCLUDE'."
             fi
