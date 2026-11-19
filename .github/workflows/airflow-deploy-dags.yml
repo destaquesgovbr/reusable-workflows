@@ -1,11 +1,15 @@
 # Reusable Workflow: deploy de DAGs (e plugins) do Airflow em um ou mais buckets GCS
 #
-# Sucessor do composer-deploy-dags.yml (v1), que continua igual para quem ainda o usa.
-# Diferenças:
-#   - não descobre o bucket com `gcloud composer environments describe`: recebe a lista
-#     em `buckets` (sem gs://) e publica em cada um, no layout do Composer:
-#       DAGs    -> gs://<bucket>/dags/<dags_bucket_subdir>/
-#       plugins -> gs://<bucket>/plugins/<basename(plugins_local_path)>/
+# Publica no bucket do Airflow próprio (VM destaquesgovbr-airflow), gs://destaquesgovbr-airflow,
+# que o dag-sync da VM espelha em /opt/airflow/{dags,plugins} a cada 60 s:
+#   DAGs    -> gs://<bucket>/dags/<dags_bucket_subdir>/
+#   plugins -> gs://<bucket>/plugins/<basename(plugins_local_path)>/
+#
+# Sucessor do composer-deploy-dags.yml (v1), descontinuado: o Cloud Composer foi desligado
+# (Fase 7 da migração, infra/_plan/migrar-composer-para-airflow-proprio.md) e o v1 falha no
+# `gcloud composer environments describe`. Diferenças em relação ao v1:
+#   - não descobre o bucket pelo Composer: recebe a lista em `buckets` (sem gs://) e publica
+#     em cada um;
 #   - valida com o Airflow 3.1.8 (o da imagem do Airflow próprio) instalado com o
 #     arquivo de constraints oficial, e o py_compile é recursivo (DAGs e plugins);
 #   - usa `gcloud storage rsync` no lugar do `gsutil rsync`.
@@ -17,9 +21,6 @@
 #       with:
 #         dags_local_path: dags
 #         dags_bucket_subdir: scraper
-#
-# Migração do Composer para o Airflow próprio (infra/_plan/migrar-composer-para-airflow-proprio.md):
-# na Fase 3 o default de `buckets` publica no bucket do Composer e no do Airflow próprio.
 
 name: Deploy DAGs to Airflow
 
@@ -42,10 +43,10 @@ on:
           O deploy é feito em cada um, na ordem.
         required: false
         type: string
-        # Fase 3 da migração: bucket do Cloud Composer + bucket do Airflow próprio.
-        # Fase 7 (desligar o Composer): tirar daqui southamerica-east1-destaque-227e22da-bucket
-        # e mover a tag v3; os callers não mudam.
-        default: 'southamerica-east1-destaque-227e22da-bucket destaquesgovbr-airflow'
+        # Só o bucket do Airflow próprio desde a Fase 7 (Composer desligado; o bucket
+        # southamerica-east1-destaque-227e22da-bucket é apagado). Quem fixa @v3 recebe a
+        # mudança quando a tag v3 é movida; os callers não mudam.
+        default: 'destaquesgovbr-airflow'
       python_version:
         description: 'Versão do Python da validação (a da imagem do Airflow)'
         required: false

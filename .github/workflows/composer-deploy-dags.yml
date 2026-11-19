@@ -1,6 +1,11 @@
 # Reusable Workflow: Deploy DAGs to Cloud Composer
 # Called by repos that need to sync local DAG files to the Composer GCS bucket.
 #
+# DESCONTINUADO (v1): o Cloud Composer foi desligado (Fase 7 da migração para o Airflow
+# próprio, infra/_plan/migrar-composer-para-airflow-proprio.md). O `gcloud composer
+# environments describe` deste workflow falha. Use o airflow-deploy-dags.yml@v3. O arquivo
+# fica só como histórico das tags v1.
+#
 # Usage:
 #   jobs:
 #     deploy:

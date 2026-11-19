@@ -19,7 +19,7 @@ Fetches Typesense configuration from GCP Secret Manager. Handles authentication 
 
 ### [airflow-deploy-dags](./.github/workflows/airflow-deploy-dags.yml) (`@v3`)
 
-Valida e publica DAGs (e, opcionalmente, um pacote de plugins) do Airflow em um ou mais buckets GCS, no layout do Composer. Substitui o `composer-deploy-dags` na migração do Cloud Composer para o Airflow próprio (`infra/_plan/migrar-composer-para-airflow-proprio.md`, Fase 3): não chama `gcloud composer environments describe` e publica em cada bucket de `buckets`.
+Valida e publica DAGs (e, opcionalmente, um pacote de plugins) do Airflow em um ou mais buckets GCS. Por padrão publica só no bucket do Airflow próprio (VM `destaquesgovbr-airflow`), `gs://destaquesgovbr-airflow`, que o `dag-sync` da VM espelha em `/opt/airflow/{dags,plugins}` a cada 60 s. Substitui o `composer-deploy-dags` (v1), descontinuado desde que o Cloud Composer foi desligado (`infra/_plan/migrar-composer-para-airflow-proprio.md`, Fase 7): não chama `gcloud composer environments describe` e publica em cada bucket de `buckets`.
 
 ```yaml
 jobs:
@@ -45,7 +45,7 @@ Para cada bucket `b` de `buckets`:
 |-------|-------------|---------|-----------|
 | `dags_local_path` | sim | — | Diretório local das DAGs |
 | `dags_bucket_subdir` | sim | — | Subpasta em `dags/`: um nome só, sem `/`; `platform` é reservado (DAG de heartbeat do repo infra) |
-| `buckets` | não | `southamerica-east1-destaque-227e22da-bucket destaquesgovbr-airflow` | Buckets de destino, só o nome (sem `gs://`), separados por espaço ou quebra de linha |
+| `buckets` | não | `destaquesgovbr-airflow` | Buckets de destino, só o nome (sem `gs://`), separados por espaço ou quebra de linha |
 | `python_version` | não | `3.11` | Python da validação |
 | `airflow_version` | não | `3.1.8` | Airflow da validação (o da imagem em `infra/airflow/Dockerfile`) |
 | `airflow_extra_packages` | não | `apache-airflow-providers-postgres apache-airflow-providers-google apache-airflow-providers-standard` | Pacotes extras da validação |
@@ -53,7 +53,9 @@ Para cada bucket `b` de `buckets`:
 | `check_imports` | não | `false` | Executa cada DAG para achar erros de import (só avisa) |
 | `plugins_local_path` | não | `""` | Pacote de plugins (ex.: `src/data_publishing`); vazio = sem plugins |
 
-O default de `buckets` publica no bucket do Composer e no do Airflow próprio enquanto os dois convivem. Na Fase 7 (desligar o Composer), o bucket do Composer sai do default e a tag `v3` é movida; os callers não mudam.
+O default de `buckets` é só o bucket do Airflow próprio. Até a `v3.0.0` ele incluía também o bucket do Composer (`southamerica-east1-destaque-227e22da-bucket`), da fase em que os dois conviviam; a partir da `v3.1.0` o bucket do Composer saiu, e a tag `v3` aponta para ela. Os callers que fixam `@v3` não mudam. Quem passa `buckets` explicitamente (ex.: o `data-platform`, que repassa a lista do job de plugins) precisa tirar o bucket do Composer da própria lista.
+
+Depois do deploy, um arquivo novo aparece no Airflow em até ~2 min (dag-sync + refresh do bundle) e uma mudança numa DAG existente em até ~4 min (dag-sync + `min_file_process_interval` de 180 s). Ver `infra/airflow/README.md`.
 
 #### Jobs
 
@@ -69,16 +71,16 @@ O default de `buckets` publica no bucket do Composer e no do Airflow próprio en
 
 #### Migrando do `composer-deploy-dags@v1`
 
-Troque só o `uses:`; os inputs são os mesmos.
+Troque só o `uses:`; os inputs são os mesmos. Com o Composer desligado, o v1 não funciona mais.
 
 ```diff
 -    uses: destaquesgovbr/reusable-workflows/.github/workflows/composer-deploy-dags.yml@v1
 +    uses: destaquesgovbr/reusable-workflows/.github/workflows/airflow-deploy-dags.yml@v3
 ```
 
-### [composer-deploy-dags](./.github/workflows/composer-deploy-dags.yml) (`@v1`, legado)
+### [composer-deploy-dags](./.github/workflows/composer-deploy-dags.yml) (`@v1`, descontinuado)
 
-> Legado: publica só no Cloud Composer. Use o `airflow-deploy-dags@v3`.
+> **Descontinuado.** O Cloud Composer foi desligado (Fase 7 da migração para o Airflow próprio) e este workflow falha no `gcloud composer environments describe`. Use o [`airflow-deploy-dags@v3`](#airflow-deploy-dags-v3). O arquivo fica no repo só como histórico das tags `v1`.
 
 Reusable workflow that validates and deploys Airflow DAGs to Cloud Composer. Handles GCP authentication (Workload Identity), bucket discovery, `gsutil rsync`, and post-deploy verification.
 
@@ -112,11 +114,21 @@ jobs:
 
 This repository uses semantic versioning:
 
-- `@v1` - Latest version of major version 1 (recommended)
-- `@v1.0.0` - Specific version
+- `@vN` - Latest version of major version N (recommended)
+- `@vN.M.P` - Specific version
 - `@main` - Latest development (not recommended for production)
 
-Tags maiores em uso: `v1` (`composer-deploy-dags`, `fetch-typesense-config`), `v2` (`cloud-run-deploy`) e `v3` (`airflow-deploy-dags`).
+Tags maiores em uso: `v1` (`fetch-typesense-config`; o `composer-deploy-dags` está descontinuado), `v2` (`cloud-run-deploy`) e `v3` (`airflow-deploy-dags`).
+
+Depois de mergear uma mudança compatível, crie a tag da versão e mova a tag maior para ela (os callers fixam a maior):
+
+```bash
+git checkout main && git pull
+git tag v3.1.0
+git tag -f v3 v3.1.0
+git push origin v3.1.0
+git push -f origin v3
+```
 
 ## Contributing
 
